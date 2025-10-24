@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Meshtastic Contact Visualizer</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body { margin:0; padding:0; }
+    #map { width:100vw; height:100vh; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([42.37, -71.20], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    const ownPath = [];
+    const ownPolyline = L.polyline(ownPath, {color:'blue'}).addTo(map);
+    const contactsLayer = L.featureGroup().addTo(map);
+    const seenContacts = new Set();
+
+    const knownIcon = L.icon({
+      iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+      iconSize: [25,41],
+      iconAnchor: [12,41]
+    });
+    const unknownIcon = L.divIcon({
+      html: '<div style="width:20px;height:20px;border-radius:50%;background:rgba(255,165,0,0.5);border:1px dashed #f80;"></div>',
+      className: ''
+    });
+    const selfIcon = L.divIcon({
+      html: '<div style="width:12px;height:12px;border-radius:50%;background:#0088ff;border:2px solid white;"></div>',
+      className: ''
+    });
+
+    function formatAgo(timestamp) {
+      const now = new Date();
+      const then = new Date(timestamp);
+      const seconds = Math.round((now - then) / 1000);
+      return seconds < 60 ? `${seconds}s ago` : `${Math.round(seconds / 60)}m ago`;
+    }
+
+    function getColorFromSnr(snr) {
+      const snrVal = parseFloat(snr);
+      if (isNaN(snrVal)) return 'gray';
+      if (snrVal >= 10) return 'green';
+      if (snrVal >= 0) return 'orange';
+      return 'red';
+    }
+
+    async function parseAndPlot() {
+      try {
+        const res = await fetch('log.csv?' + Date.now());
+        const text = await res.text();
+        const lines = text.trim().split('\n');
+        if (lines.length === 0) return;
+        const header = lines.shift().split(',');
+
+        const idx = {};
+        header.forEach((h, i) => idx[h.trim()] = i);
+
+        lines.forEach(row => {
+          const cols = row.split(',');
+          const timestamp = cols[idx['timestamp']] || '';
+          const ourLat = parseFloat(cols[idx['our_latitude']]);
+          const ourLon = parseFloat(cols[idx['our_longitude']]);
+          const nodeLat = parseFloat(cols[idx['node_latitude']]);
+          const nodeLon = parseFloat(cols[idx['node_longitude']]);
+          const nodeId = cols[idx['node_id']] || '';
+          const nodeName = cols[idx['node_name']] || 'Unknown';
+          const snr = cols[idx['snr']] || '';
+
+          if (!timestamp || !nodeId) return;
+
+          const key = `${timestamp}_${nodeId}`;
+          if (seenContacts.has(key)) return;
+          seenContacts.add(key);
+
+          const ago = formatAgo(timestamp);
+          const shortName = (nodeName && nodeName.length > 12) ? nodeName.slice(0, 12) + '…' : nodeName;
+          const color = getColorFromSnr(snr);
+
+          let fromLatLng;
+          if (!isNaN(ourLat) && !isNaN(ourLon)) {
+            fromLatLng = [ourLat, ourLon];
+            ownPath.push(fromLatLng);
+            ownPolyline.setLatLngs(ownPath);
+            L.marker(fromLatLng, {icon: selfIcon})
+              .bindPopup(`You @ ${timestamp}`)
+              .addTo(contactsLayer);
+          }
+
+          if (!isNaN(nodeLat) && !isNaN(nodeLon)) {
+            const toLatLng = [nodeLat, nodeLon];
+            L.marker(toLatLng, {icon: knownIcon})
+              .bindPopup(`${shortName} (${ago})<br>SNR: ${snr}`)
+              .addTo(contactsLayer);
+            if (fromLatLng) {
+              L.polyline([fromLatLng, toLatLng], {color: color}).addTo(contactsLayer);
+            }
+          } else if (fromLatLng) {
+            // unknown node position
+            L.marker(fromLatLng, {icon: unknownIcon})
+              .bindPopup(`${shortName} (no position)<br>${ago}<br>SNR: ${snr}`)
+              .addTo(contactsLayer);
+            const stub = [
+              fromLatLng,
+              [fromLatLng[0], fromLatLng[1] + 0.0004]
+            ];
+            L.polyline(stub, {color: color, dashArray: '4,4'}).addTo(contactsLayer);
+          }
+        });
+
+        let bounds = ownPolyline.getBounds();
+        if (contactsLayer.getBounds().isValid()) {
+          bounds = bounds.isValid() ? bounds.extend(contactsLayer.getBounds()) : contactsLayer.getBounds();
+        }
+        if (bounds.isValid()) map.fitBounds(bounds, {maxZoom: 16});
+      } catch (error) {
+        console.error('Error parsing log:', error);
+      }
+    }
+
+    parseAndPlot();
+    setInterval(parseAndPlot, 60 * 1000);
+  </script>
+</body>
+</html>
