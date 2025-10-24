@@ -110,8 +110,8 @@
         }
       });
 
-      //const bounds = ownPolyline.getBounds().extend(contactsLayer.getBounds());
-      //if (bounds.isValid()) map.fitBounds(bounds, {maxZoom: 16});
+      const bounds = ownPolyline.getBounds().extend(contactsLayer.getBounds());
+      if (bounds.isValid()) map.fitBounds(bounds, {maxZoom: 16});
     }
 
     parseAndPlot();
