@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meshtastic Live Map</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Socket.IO -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        
+        #header {
+            background-color: #2d2d2d;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        #header h1 {
+            margin: 0;
+            color: #4CAF50;
+            display: inline-block;
+        }
+        
+        #status {
+            float: right;
+            margin-top: 5px;
+        }
+        
+        #map {
+            height: calc(100vh - 80px);
+            width: 100%;
+        }
+        
+        .info-panel {
+            position: absolute;
+            top: 90px;
+            right: 10px;
+            background: rgba(45, 45, 45, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            z-index: 1000;
+            min-width: 250px;
+        }
+        
+        .info-panel h3 {
+            margin: 0 0 10px 0;
+            color: #4CAF50;
+        }
+        
+        .stat {
+            margin: 5px 0;
+        }
+        
+        .connected {
+            color: #4CAF50;
+        }
+        
+        .disconnected {
+            color: #f44336;
+        }
+        
+        .popup-content {
+            color: #333;
+        }
+        
+        .popup-content .node-id {
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        
+        .popup-content .node-info {
+            margin: 3px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1>🚗 Meshtastic Live Map</h1>
+        <div id="status">
+            <span id="connection-status" class="disconnected">Disconnected</span>
+        </div>
+    </div>
+    
+    <div class="info-panel">
+        <h3>📡 Live Stats</h3>
+        <div class="stat">Nodes Seen: <span id="node-count">0</span></div>
+        <div class="stat">Our Location: <span id="our-location">Unknown</span></div>
+        <div class="stat">Last Update: <span id="last-update">Never</span></div>
+    </div>
+    
+    <div id="map"></div>
+
+    <!-- Leaflet JavaScript -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        // Initialize map centered on New England
+        const map = L.map('map').setView([43.5, -71.5], 8);
+        
+        // Add multiple tile layer options
+        const tileLayers = {
+            'OpenStreetMap': L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }),
+            'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenTopoMap contributors'
+            }),
+            'CartoDB': L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '© CartoDB'
+            })
+        };
+        
+        // Add default layer
+        tileLayers['CartoDB'].addTo(map);
+        
+        // Add layer control
+        L.control.layers(tileLayers).addTo(map);
+        
+        // Markers and data
+        let ourMarker = null;
+        let nodeMarkers = {};
+        let ourPath = [];
+        let pathPolyline = null;
+        
+        // Custom icons
+        const ourIcon = L.divIcon({
+            className: 'our-marker',
+            html: '<div style="background-color: #4CAF50; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+        });
+        
+        const nodeIcon = L.divIcon({
+            className: 'node-marker',
+            html: '<div style="background-color: #2196F3; width: 15px; height: 15px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>',
+            iconSize: [15, 15],
+            iconAnchor: [7.5, 7.5]
+        });
+        
+        const newNodeIcon = L.divIcon({
+            className: 'new-node-marker',
+            html: '<div style="background-color: #FF5722; width: 15px; height: 15px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3); animation: pulse 2s infinite;"></div><style>@keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.2); } 100% { transform: scale(1); } }</style>',
+            iconSize: [15, 15],
+            iconAnchor: [7.5, 7.5]
+        });
+        
+        // Socket.IO connection
+        const socket = io();
+        
+        socket.on('connect', function() {
+            document.getElementById('connection-status').textContent = 'Connected';
+            document.getElementById('connection-status').className = 'connected';
+            loadInitialData();
+        });
+        
+        socket.on('disconnect', function() {
+            document.getElementById('connection-status').textContent = 'Disconnected';
+            document.getElementById('connection-status').className = 'disconnected';
+        });
+        
+        socket.on('nodes_update', function(data) {
+            updateMap(data);
+        });
+        
+        function loadInitialData() {
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => {
+                    updateMap(data);
+                })
+                .catch(error => console.error('Error loading initial data:', error));
+        }
+        
+        function updateMap(data) {
+            // Update our position
+            if (data.our_position && data.our_position.lat && data.our_position.lon) {
+                const ourPos = [data.our_position.lat, data.our_position.lon];
+                
+                if (ourMarker) {
+                    ourMarker.setLatLng(ourPos);
+                } else {
+                    ourMarker = L.marker(ourPos, {icon: ourIcon})
+                        .addTo(map)
+                        .bindPopup('<div class="popup-content"><span class="node-id">Our Position</span><br/>Lat: ' + 
+                                  data.our_position.lat.toFixed(6) + '<br/>Lon: ' + 
+                                  data.our_position.lon.toFixed(6) + '</div>');
+                }
+                
+                // Add to path
+                ourPath.push(ourPos);
+                if (ourPath.length > 100) { // Limit path length
+                    ourPath.shift();
+                }
+                
+                // Update path polyline
+                if (pathPolyline) {
+                    map.removeLayer(pathPolyline);
+                }
+                if (ourPath.length > 1) {
+                    pathPolyline = L.polyline(ourPath, {
+                        color: '#4CAF50',
+                        weight: 3,
+                        opacity: 0.7
+                    }).addTo(map);
+                }
+                
+                document.getElementById('our-location').textContent = 
+                    `${data.our_position.lat.toFixed(4)}, ${data.our_position.lon.toFixed(4)}`;
+            }
+            
+            // Update nodes
+            if (data.nodes) {
+                data.nodes.forEach(node => {
+                    if (node.latitude && node.longitude) {
+                        const nodePos = [node.latitude, node.longitude];
+                        const icon = node.is_new ? newNodeIcon : nodeIcon;
+                        
+                        if (nodeMarkers[node.id]) {
+                            nodeMarkers[node.id].setLatLng(nodePos);
+                            nodeMarkers[node.id].setIcon(icon);
+                        } else {
+                            nodeMarkers[node.id] = L.marker(nodePos, {icon: icon})
+                                .addTo(map)
+                                .bindPopup(`
+                                    <div class="popup-content">
+                                        <span class="node-id">${node.user}</span><br/>
+                                        <div class="node-info">ID: ${node.id}</div>
+                                        <div class="node-info">Hardware: ${node.hardware}</div>
+                                        <div class="node-info">SNR: ${node.snr}</div>
+                                        <div class="node-info">Location: ${node.latitude.toFixed(6)}, ${node.longitude.toFixed(6)}</div>
+                                    </div>
+                                `);
+                        }
+                    }
+                });
+                
+                document.getElementById('node-count').textContent = Object.keys(nodeMarkers).length;
+            }
+            
+            if (data.total_nodes) {
+                document.getElementById('node-count').textContent = data.total_nodes;
+            }
+            
+            document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+        }
+        
+        // Auto-follow our position
+        let followMode = true;
+        map.on('dragstart', function() {
+            followMode = false;
+        });
+        
+        // Double-click to re-enable follow mode
+        map.on('dblclick', function() {
+            followMode = true;
+            if (ourMarker) {
+                map.setView(ourMarker.getLatLng(), map.getZoom());
+            }
+        });
+        
+        // Follow our marker when it updates
+        function followOurMarker() {
+            if (followMode && ourMarker) {
+                map.setView(ourMarker.getLatLng(), map.getZoom());
+            }
+        }
+        
+        // Load initial data when page loads
+        window.addEventListener('load', loadInitialData);
+    </script>
+</body>
+</html>
